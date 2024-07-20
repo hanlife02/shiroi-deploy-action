@@ -30,6 +30,8 @@ jobs:
         run: |
           content=$(cat ${{ env.HASH_FILE }}) || true
           echo "hash_content=$content" >> "$GITHUB_OUTPUT"
+      - name: Debug output
+        run: echo "hash_content=${{ steps.read_hash.outputs.hash_content }}"
 
   check:
     name: Check Should Rebuild
@@ -58,7 +60,9 @@ jobs:
             echo "canceled=true" >> $GITHUB_OUTPUT
           else
             echo "Hashes do not match. Continuing workflow."
-          fi
+      - name: Debug output
+        run: |
+          echo "canceled=${{ steps.use_content.outputs.canceled }}"
 
   build:
     name: Build artifact
