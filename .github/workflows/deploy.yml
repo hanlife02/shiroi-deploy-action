@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-  # schedule:
-  #   - cron: '0 3 * * *'
-
   repository_dispatch:
     types: [trigger-workflow]
 
@@ -21,32 +18,39 @@ jobs:
     name: Prepare
     runs-on: ubuntu-latest
     if: ${{ github.event.head_commit.message != 'Update hash file' }}
-
     outputs:
       hash_content: ${{ steps.read_hash.outputs.hash_content }}
-
     steps:
       - name: Cancel Previous Runs
         uses: styfle/cancel-workflow-action@0.12.1
+
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Read HASH_FILE content
         id: read_hash
         run: |
-          content=$(cat ${{ env.HASH_FILE }}) || true
+          if [ -f ${{ env.HASH_FILE }} ]; then
+            content=$(cat ${{ env.HASH_FILE }})
+          else
+            content=""
+          fi
           echo "hash_content=$content" >> "$GITHUB_OUTPUT"
+
+      - name: Debug output for prepare
+        run: echo "hash_content=${{ steps.read_hash.outputs.hash_content }}"
+
   check:
     name: Check Should Rebuild
     runs-on: ubuntu-latest
     needs: prepare
     outputs:
       canceled: ${{ steps.use_content.outputs.canceled }}
-
     steps:
       - uses: actions/checkout@v4
         with:
           repository: innei-dev/shiroi
-          token: ${{ secrets.GH_PAT }} # `GH_PAT` is a secret that contains your PAT
+          token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
           lfs: true
 
@@ -64,14 +68,16 @@ jobs:
             echo "canceled=true" >> $GITHUB_OUTPUT
           else
             echo "Hashes do not match. Continuing workflow."
-          fi
+            echo "canceled=false" >> $GITHUB_OUTPUT
+
+      - name: Debug output for check
+        run: echo "canceled=${{ steps.use_content.outputs.canceled }}"
 
   build:
     name: Build artifact
     runs-on: ubuntu-latest
     needs: check
-    if: ${{needs.check.outputs.canceled != 'true'}}
-
+    if: needs.check.outputs.canceled != 'true'
     strategy:
       matrix:
         node-version: [20.x]
@@ -79,44 +85,44 @@ jobs:
       sha_short: ${{ steps.store.outputs.sha_short }}
       branch: ${{ steps.store.outputs.branch }}
     steps:
+      - name: Debug before checkout
+        run: echo "Check output canceled: ${{ needs.check.outputs.canceled }}"
+
       - uses: actions/checkout@v4
         with:
           repository: innei-dev/shiroi
-          token: ${{ secrets.GH_PAT }} # `GH_PAT` is a secret that contains your PAT
+          token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
           lfs: true
 
       - name: Checkout LFS objects
         run: git lfs checkout
+
       - uses: pnpm/action-setup@v2
         with:
           version: ${{ env.PNPM_VERSION }}
+
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'pnpm'
+
       - name: Install dependencies
         run: pnpm install
+
       - uses: actions/cache@v4
         with:
           path: |
             ~/.npm
             ${{ github.workspace }}/.next/cache
-          # Generate a new cache whenever packages or source files change.
           key: ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx') }}
-          # If source files changed but packages didn't, rebuild from a prior cache.
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-
-      - name: Build project
-        run: |
-          sh ./ci-release-build.sh
 
-      # - uses: actions/upload-artifact@v4
-      #   with:
-      #     name: dist
-      #     path: assets/release.zip
-      #     retention-days: 7
+      - name: Build project
+        run: sh ./ci-release-build.sh
+
       - name: Cache Build Artifacts
         id: cache-primes
         uses: actions/cache/save@v4
@@ -125,7 +131,6 @@ jobs:
           key: ${{ github.run_number }}-release
 
       - name: Store artifact commit version
-        shell: bash
         id: store
         run: |
           sha_short=$(git rev-parse --short HEAD)
@@ -137,12 +142,8 @@ jobs:
     name: Deploy artifact
     runs-on: ubuntu-latest
     needs: build
+    if: needs.build.result == 'success'
     steps:
-      # - name: Download artifact
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: dist
-
       - name: Restore cached Build Artifacts
         id: cache-primes-restore
         uses: actions/cache/restore@v4
@@ -150,6 +151,7 @@ jobs:
           path: |
             assets
           key: ${{ github.run_number }}-release
+
       - name: Move assets to root
         run: mv assets/release.zip release.zip
 
@@ -166,7 +168,6 @@ jobs:
 
       - name: Exec deploy script with SSH
         uses: appleboy/ssh-action@master
-
         with:
           command_timeout: 5m
           host: ${{ secrets.HOST }}
@@ -188,12 +189,9 @@ jobs:
             unzip -o $workdir/release.zip
             cp $HOME/shiro/.env $workdir/standalone/.env
             export NEXT_SHARP_PATH=$(npm root -g)/sharp
-            # copy workdir ecosystem.config.js to basedir if not exists
             if [ ! -f $basedir/ecosystem.config.js ]; then
               cp $workdir/standalone/ecosystem.config.js $basedir/ecosystem.config.js
             fi
-            # https://github.com/Unitech/pm2/issues/3054
-            # symlink workdir node entry file to basedir
             ln -sf $workdir/standalone/server.js $basedir/server.js
             mkdir -p $workdir/standalone/.next
             rm -rf $workdir/standalone/.next/cache
@@ -207,8 +205,8 @@ jobs:
       - name: After deploy script
         run: |
           hash=${{ needs.build.outputs.sha_short }}
-          # curl -X "POST" "https://innei.ren/api/v2/fn/shiro/new-version-hook" -H 'Content-Type: application/json' -d "{\"hash\": \"$hash\", \"key\": \"\"}"
           ${{ secrets.AFTER_DEPLOY_SCRIPT }}
+
   store:
     name: Store artifact commit version
     runs-on: ubuntu-latest
@@ -217,9 +215,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal token
-          fetch-depth: 0 # otherwise, you will failed to push refs to dest repo
-      # Get the commit version from the build job
+          persist-credentials: false
+          fetch-depth: 0
+
       - name: Use outputs from build
         env:
           SHA_SHORT: ${{ needs.build.outputs.sha_short }}
@@ -227,17 +225,19 @@ jobs:
         run: |
           echo "SHA Short from build: $SHA_SHORT"
           echo "Branch from build: $BRANCH"
+
       - name: Write hash to file
         env:
           SHA_SHORT: ${{ needs.build.outputs.sha_short }}
-
         run: echo $SHA_SHORT > ${{ env.HASH_FILE }}
+
       - name: Commit files
         run: |
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add ${{ env.HASH_FILE }}
           git commit -a -m "Update hash file"
+
       - name: Push changes
         uses: ad-m/github-push-action@master
         with:
